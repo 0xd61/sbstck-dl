@@ -39,7 +39,7 @@ var (
 					fmt.Println("Warning: --before and --after flags are ignored when downloading a single post")
 				}
 
-				post, err := extractor.ExtractPost(ctx, downloadUrl)
+				post, err := extractor.ExtractPost(ctx, downloadUrl, outputFolder)
 				if err != nil {
 					log.Fatalln(err)
 				}
@@ -97,7 +97,7 @@ var (
 					progressbar.OptionSetWidth(25),
 					progressbar.OptionSetDescription("downloading"),
 					progressbar.OptionShowBytes(true))
-				for result := range extractor.ExtractAllPosts(ctx, urls) {
+				for result := range extractor.ExtractAllPosts(ctx, urls, outputFolder) {
 					select {
 					case <-ctx.Done():
 						log.Fatalln("context cancelled")

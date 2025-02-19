@@ -2,9 +2,14 @@ package lib
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/net/html"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +20,8 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/k3a/html2text"
 )
+
+var ErrTokenizer = errors.New("Tokenizer Error")
 
 // RawPost represents a raw Substack post in string format.
 type RawPost struct {
@@ -48,6 +55,119 @@ type Post struct {
 	//PostTags         []string `json:"postTags"`
 	Title    string `json:"title"`
 	BodyHTML string `json:"body_html"`
+}
+
+// downloadFileIntoFolder downloads the specified file into the target dir and returns
+// the absolute filepath
+func downloadFileIntoFolder(url, targetDir string) (string, error) {
+	filetype := filepath.Ext(url)
+	urlHash := md5.Sum([]byte(url))
+	filename := hex.EncodeToString(urlHash[:]) + filetype
+
+	// Create the file
+	err := os.MkdirAll(targetDir, os.ModePerm)
+	if err != nil {
+		return "", err
+	}
+
+	filePath := filepath.Join(targetDir, filename)
+	out, err := os.Create(filePath)
+	if err != nil {
+		return filePath, err
+	}
+	defer out.Close()
+
+	// Get the data
+	resp, err := http.Get(url)
+	if err != nil {
+		return filePath, err
+	}
+	defer resp.Body.Close()
+
+	// Writer the body to file
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return filePath, err
+	}
+
+	return filePath, nil
+}
+
+// DownloadImages downloads the images referenced in a post into a directory and updates the url to the local file.
+func (p *Post) DownloadImages(dir string) error {
+	reader := strings.NewReader(p.BodyHTML)
+	z := html.NewTokenizer(reader)
+
+	replacedBody := p.BodyHTML
+	lastImageFilename := ""
+
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			break
+		} else if tt == html.StartTagToken {
+			tokenName, _ := z.TagName()
+
+			if len(tokenName) == 3 && string(tokenName) == "img" {
+				nextTag := true
+				key := []byte("")
+				attrib := []byte("")
+				// @performance, if too slow, we need another comparison
+				for nextTag {
+					key, attrib, nextTag = z.TagAttr()
+
+					if string(key) == "src" {
+						//fmt.Println(string(attrib))
+						// @performance, ultra slow because of finding and recopying...
+						// but it is simple for now.
+						// Only replace one time for now to keep the srcset string intact,
+						// to be able to remove it completely.
+						replacedBody = strings.Replace(replacedBody, string(attrib), lastImageFilename, 1)
+					}
+
+					if string(key) == "srcset" {
+						replacedBody = strings.ReplaceAll(replacedBody, string(attrib), "")
+					}
+				}
+			}
+
+			if len(tokenName) == 6 && string(tokenName) == "source" {
+                token := z.Raw()
+				replacedBody = strings.ReplaceAll(replacedBody, string(token), "")
+			}
+
+			if len(tokenName) == 1 && tokenName[0] == 'a' {
+				nextTag := true
+				isDownloadableImage := false
+				key := []byte("")
+				attrib := []byte("")
+				// @performance, if too slow, we need another comparison
+				for nextTag {
+					key, attrib, nextTag = z.TagAttr()
+					//fmt.Println(string(attrib))
+					if string(key) == "class" && string(attrib) == "image-link image2 is-viewable-img" {
+						isDownloadableImage = true
+					}
+
+					if isDownloadableImage && string(key) == "href" {
+						postFolder := p.Slug
+						filename, err := downloadFileIntoFolder(string(attrib), filepath.Join(dir, postFolder))
+						if err != nil {
+							return err
+						}
+
+						relativePath := strings.TrimLeft(filename, dir)
+						fileURI := "./" + relativePath
+						lastImageFilename = fileURI
+					}
+				}
+			}
+		}
+	}
+
+	//fmt.Println(p.BodyHTML)
+	p.BodyHTML = replacedBody
+	return nil
 }
 
 // ToMD converts the Post's HTML body to Markdown format.
@@ -170,7 +290,7 @@ func extractJSONString(scriptContent string) (string, error) {
 	return scriptContent[start+len("JSON.parse(\"") : end], nil
 }
 
-func (e *Extractor) ExtractPost(ctx context.Context, pageUrl string) (Post, error) {
+func (e *Extractor) ExtractPost(ctx context.Context, pageUrl string, downloadDir string) (Post, error) {
 	// fetch page HTML content
 	body, err := e.fetcher.FetchURL(ctx, pageUrl)
 	if err != nil {
@@ -206,6 +326,11 @@ func (e *Extractor) ExtractPost(ctx context.Context, pageUrl string) (Post, erro
 	p, err := rawJSON.ToPost()
 	if err != nil {
 		return Post{}, fmt.Errorf("failed to fetch page: %s", err)
+	}
+
+	err = p.DownloadImages(downloadDir)
+	if err != nil && !errors.Is(err, ErrTokenizer) {
+		return Post{}, fmt.Errorf("failed to save image: %s", err)
 	}
 
 	return p, nil
@@ -269,7 +394,7 @@ type ExtractResult struct {
 	Err  error
 }
 
-func (e *Extractor) ExtractAllPosts(ctx context.Context, urls []string) <-chan ExtractResult {
+func (e *Extractor) ExtractAllPosts(ctx context.Context, urls []string, downloadDir string) <-chan ExtractResult {
 	ch := make(chan ExtractResult, len(urls))
 
 	go func() {
@@ -278,7 +403,7 @@ func (e *Extractor) ExtractAllPosts(ctx context.Context, urls []string) <-chan E
 		for _, u := range urls {
 			go func(url string) {
 				defer wg.Done()
-				post, err := e.ExtractPost(ctx, url)
+				post, err := e.ExtractPost(ctx, url, downloadDir)
 				ch <- ExtractResult{Post: post, Err: err}
 			}(u)
 		}
