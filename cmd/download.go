@@ -19,6 +19,7 @@ var (
 	format       string
 	outputFolder string
 	dryRun       bool
+	video        bool
 	downloadCmd  = &cobra.Command{
 		Use:   "download",
 		Short: "Download individual posts or the entire public archive",
@@ -54,6 +55,14 @@ var (
 				}
 
 				post.WriteToFile(path, format)
+
+				if video {
+					videoPath := makePath(post, outputFolder, "mp4")
+					err := extractor.DownloadVideo(ctx, post, videoPath)
+					if err != nil {
+						fmt.Printf("Failed to download video with err: %v", err)
+					}
+				}
 
 				if verbose {
 					fmt.Println("Done in ", time.Since(startTime))
@@ -123,6 +132,14 @@ var (
 					}
 
 					post.WriteToFile(path, format)
+
+					if video {
+						videoPath := makePath(post, outputFolder, "mp4")
+						err := extractor.DownloadVideo(ctx, post, videoPath)
+						if err != nil {
+							fmt.Printf("Failed to download video with err: %v", err)
+						}
+					}
 				}
 				if verbose {
 					fmt.Println("Downloaded", downloadedPostsCount, "posts, out of", len(urls))
@@ -138,6 +155,8 @@ func init() {
 	downloadCmd.Flags().StringVarP(&format, "format", "f", "html", "Specify the output format (options: \"html\", \"md\", \"txt\"")
 	downloadCmd.Flags().StringVarP(&outputFolder, "output", "o", ".", "Specify the download directory")
 	downloadCmd.Flags().BoolVarP(&dryRun, "dry-run", "d", false, "Enable dry run")
+
+	downloadCmd.Flags().BoolVarP(&video, "video", "V", false, "Download video if available")
 	downloadCmd.MarkFlagRequired("url")
 }
 

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -54,6 +55,7 @@ type Post struct {
 	WordCount        int    `json:"wordcount"`
 	//PostTags         []string `json:"postTags"`
 	Title    string `json:"title"`
+	VideoId  string `json:"video_upload_id"`
 	BodyHTML string `json:"body_html"`
 }
 
@@ -132,7 +134,7 @@ func (p *Post) DownloadImages(dir string) error {
 			}
 
 			if len(tokenName) == 6 && string(tokenName) == "source" {
-                token := z.Raw()
+				token := z.Raw()
 				replacedBody = strings.ReplaceAll(replacedBody, string(token), "")
 			}
 
@@ -288,6 +290,67 @@ func extractJSONString(scriptContent string) (string, error) {
 	}
 
 	return scriptContent[start+len("JSON.parse(\"") : end], nil
+}
+
+func (e *Extractor) DownloadVideo(ctx context.Context, post Post, path string) error {
+	videoURL := fmt.Sprintf("https://substack.com/api/v1/video/upload/%s/src?type=mp4&download=video_1_default", post.VideoId)
+
+	filetype := "mp4"
+	urlHash := md5.Sum([]byte(videoURL))
+	inputFile := hex.EncodeToString(urlHash[:]) + "." + filetype
+
+	resp, err := http.Get(videoURL)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	absInputFile := filepath.Join("/tmp", inputFile)
+	inputFileHandle, err := os.Create(absInputFile)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Downloading %s\n", videoURL)
+	_, err = io.Copy(inputFileHandle, resp.Body)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Transcoding %s\n", absInputFile)
+	cmd := exec.Command("ffmpeg", "-y", // Yes to all
+		//"-hide_banner", "-loglevel", "panic", // Hide all logs
+		"-i", absInputFile,
+		"-f", filetype,
+		"-c:v", "libx265",
+		"-c:a", "copy",
+		"-crf", "28",
+		path, // save file
+	)
+
+	cmd.Stderr = os.Stderr
+
+	fmt.Println("Starting command")
+	err = cmd.Start()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Waiting for ffpmeg to finish")
+	err = cmd.Wait() // wait until ffmpeg finish
+	if err != nil {
+		fmt.Printf("Error waiting for FFmpeg to finish: %v\n", err)
+		return err
+	}
+
+	os.Remove(absInputFile)
+
+	return nil
 }
 
 func (e *Extractor) ExtractPost(ctx context.Context, pageUrl string, downloadDir string) (Post, error) {
